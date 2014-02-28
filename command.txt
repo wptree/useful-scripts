@@ -1,0 +1,293 @@
+check opened file descriptor
+sudo lsof | wc -l
+
+
+
+mysql主从复制
+
+mysql -uroot -e "FLUSH TABLES WITH READ LOCK;"
+mysqldump -uroot -h127.0.0.1 -P3306 --all-databases  --triggers --routines --events > master.sql
+mysql -uroot -e "UNLOCK TABLES;" 
+
+rsync master.sql xpos@xpos-app:~/
+
+mysql -uroot -h127.0.0.1 -P3306 < master.sql
+
+GRANT REPLICATION SLAVE ON *.* TO sync@10.4.4.14 IDENTIFIED BY 'syncslave';
+GRANT REPLICATION SLAVE ON *.* TO sync@10.4.8.31 IDENTIFIED BY 'syncslave';
+FLUSH PRIVILEGES;
+
+ERROR 1840 (HY000) at line 24: @@GLOBAL.GTID_PURGED can only be set when @@GLOBAL.GTID_EXECUTED is empty 
+==> reset master;Could not initialize master info structure; more error messages can be found in the MySQL error log
+Could not initialize master info structure; more error messages can be found in the MySQL error log
+==> reset slave;
+
+
+CHANGE MASTER TO MASTER_HOST='10.4.8.31',MASTER_USER='sync',MASTER_PASSWORD='syncslave',MASTER_AUTO_POSITION=1309;
+START SLAVE;
+
+### 将现有的mysq数据迁移到LVM中
+su root
+service mysql stop
+lvcreate -L 30G -n mysql-data xpos-vg
+mkfs -t ext4 /dev/xpos-vg/mysql-data
+mkdir /tmp/mysql
+mount /dev/xpos-vg/mysql-data /tmp/mysql
+cd /var/mysql/data
+tar cf - . | tar xf - -C /tmp/mysql
+rm -rf *
+umount /tmp/mysql
+mount /dev/xpos-vg/mysql-data /var/mysql/data
+sudo service mysql start
+### 
+
+#通过LVM snapshot备份mysql
+mysql -uroot -p -e 'flush tables with read lock;'
+lvcreate -n mysql-snap -L 2G -s /dev/xpos-vg/mysql-data
+mysql -uroot -p -e 'unlock tables;'
+mount /dev/xpos-vg/mysql-snap /tmp/mysql/
+mkdir -p /data/backup/mysql/full-bak-`date +%F`
+cd /tmp/mysql/
+tar cf - . | tar xf - -C /data/backup/mysql/full-bak-`date +%F`
+cd /
+umount /tmp/mysql
+lvremove /dev/xpos-vg/mysql-snap
+
+#shorturl unicorn
+unicorn -c /var/www/shorturl/unicorn.rb -D
+
+#Mysql
+wget http://dev.mysql.com/get/Downloads/MySQL-5.6/mysql-5.6.14.tar.gz/from/http://cdn.mysql.com/
+sudo groupadd mysql
+sudo useradd mysql -g mysql
+sudo mkdir -p /usr/local/mysql
+sudo mkdir -p /var/mysql/data
+sudo yum -y install gcc-c++ ncurses-devel cmake make perl
+tar -zxvf mysql-5.6.14.tar.gz
+cd mysql-5.6.14
+sudo yum install Bison
+sudo cmake -DCMAKE_INSTALL_PREFIX=/usr/local/mysql -DMYSQL_UNIX_ADDR=/usr/local/mysql/mysql.sock -DDEFAULT_CHARSET=utf8 -DDEFAULT_COLLATION=utf8_general_ci -H_MYISAM_STORAGE_ENGINE=1 -DWITH_INNOBASE_STORAGE_ENGINE=1 -DWITH_ARCHIVE_STORAGE_ENGINE=1 -DWITH_BLACKHOLE_STORAGE_ENGINE=1 -DWITH_MEMORY_STORAGE_ENGINE=1 -DWITH_READLINE=1 -BLED_LOCAL_INFILE=1 -DMYSQL_DATADIR=/var/mysql/data -DMYSQL_USER=mysql -DMYSQL_TCP_PORT=3306
+sudo make
+sudo make install
+sudo make clean
+sudo chown -R mysql:mysql /usr/local/mysql
+sudo chown -R mysql:mysql /var/mysql/data
+cd /usr/local/mysql
+sudo scripts/mysql_install_db --user=mysql --datadir=/var/mysql/data
+sudo cp /usr/local/mysql/support-files/mysql.server /etc/init.d/mysql
+sudo service mysql start
+sudo ./bin/mysql_secure_installation
+
+
+#Tomcat-native
+sudo yum install -y openssl.x86_64
+sudo yum install -y openssl-devel.x86_64
+sudo yum install -y apr-devel.x86_64
+
+sudo ./configure --with-apr=/usr/bin/apr-1-config \
+                --with-java-home=/usr/local/java/ \
+                --with-ssl=yes \
+                --prefix=/usr/local/xpos
+				
+HTTPS Certificate --自制证书
+sudo openssl genrsa -des3 -out xpos.pass.key 2048   //Generate a Private Key
+pass phrase:xpos
+sudo openssl rsa -in xpos.pass.key -out xpos.key   //Remove 'Pass phrase' from Key
+sudo rm -f xpos.pass.key
+sudo openssl req -new -key xpos.key -out xpos.csr  //Generate a CSR
+sudo openssl x509 -req -days 365 -in xpos.csr -signkey xpos.key -out xpos.crt  //Generating a Self-Signed Certificate
+sudo openssl rsa -in xpos.key -pubout > xpos.pub   //Generate a public key
+
+//geotrust
+keytool -keysize 2048 -genkey -alias xpos -keyalg RSA -keystore xpos.keystore
+What is your first and last name?
+  [Unknown]:  www.xpos88.com
+What is the name of your organizational unit?
+  [Unknown]:  IT
+What is the name of your organization?
+  [Unknown]:  DZCM
+What is the name of your City or Locality?
+  [Unknown]:  Hangzhou
+What is the name of your State or Province?
+  [Unknown]:  Zhejiang
+What is the two-letter country code for this unit?
+  [Unknown]:  CN
+Is CN=*.xpos88.com, OU=IT, O=DZCM, L=Hangzhou, ST=Zhejiang, C=CN correct?
+  [no]:  y
+
+keytool -certreq -keyalg RSA -alias xpos -file xpos.csr -keystore xpos.keystore
+keytool -import -alias xpos -trustcacerts -file www_xpos88_com.p7b  -keystore xpos.keystore
+keytool -v -importkeystore -srckeystore xpos.keystore -srcalias xpos -destkeystore xpos.p12 -deststoretype PKCS12
+openssl pkcs12 -in xpos.p12 -out xpos_private.pem
+
+sudo keytool -keysize 2048 -genkey -alias xpos -keyalg RSA -keystore xpos.keystore
+sudo keytool -certreq -keyalg RSA -alias xpos -file xpos.csr -keystore xpos.keystore
+sudo keytool -list -v -keystore xpos.keystore
+sudo keytool -export -alias xpos -keystore xpos.keystore -file xpos.crt
+sudo keytool -import -alias xpos -trustcacerts -file xpos.crt -keystore xpos.keystore
+
+
+ssh xpos@10.4.4.14 "cat >> ~/.ssh/authorized_keys" < ~/.ssh/id_rsa.pub
+
+查看并修改user home dir
+cat /etc/passwd | awk -F: '{printf "User %s Home %s\n",  $1, $6}'
+sudo usermod -d /home/www/ftpuser ftpuser
+
+tar cf - . | tar xf - -C /tmp/mysql
+
+netstat -n | awk '/^tcp/ {++S[$NF]} END {for(a in S) print a, S[a]}'
+
+curl -s -o /dev/null -I -w "%{http_code}\\n" http://localhost:8080/sdbbiz
+
+Linx Nginx 文件下载，中文乱码解决方法
+wget https://www.j3e.de/linux/convmv/convmv-1.15.tar.gz
+tar xvzf convmv-1.15.tar.gz
+cd convmv-1.15
+sudo make clean
+sudo make install
+./convmv -f GB2312 -t UTF-8 -r --nosmart --notest /var/www/hejia/download/*
+
+
+sudo yum install -y vsftpd.x86_64
+sudo chkconfig --add vsftpd
+sudo chkconfig --level 2345 vsftpd on
+sudo useradd -d /home/www/ftpuser -g ftp -s /sbin/nologin ftpuser
+sudo setsebool ftp_home_dir=1
+sudo chmod -R 755 /home/www/
+sudo service vsftpd start
+
+
+同步时间
+sudo ntpdate 210.167.182.10
+
+dd if=sdbbiz_2013_08_08.tar.gz |openssl des3 -d -k 1qazZSE$|tar zxf -
+
+mv /etc/yum.repos.d/CentOS-Base.repo /etc/yum.repos.d/CentOS-Base.repo.backup
+
+cat /etc/group | awk -F: '{print $1}'
+
+groupadd deploy
+groupadd development
+useradd sdb -m -g deploy
+
+sudo groupadd www
+sudo useradd www -m -g www
+
+sudo groupadd tomcat
+sudo useradd tomcat -m -g tomcat
+
+useradd pwan -m -g development
+passwd pwan
+passwd -e pwan
+
+
+/usr/sbin/visudo -f /etc/sudoers
+%development    ALL=(ALL)       ALL
+%deploy ALL=(ALL)       NOPASSWD: ALL
+
+sudo yum -y install wget mlocate 
+sudo updatedb
+
+sudo rpm -e --nodeps mysql-libs-5.1.69-1.el6_4.x86_64
+wget http://dev.mysql.com/get/Downloads/MySQL-5.6/mysql-5.6.12.tar.gz/from/http://cdn.mysql.com/
+
+sudo vi /etc/sysconfig/iptables
+-A INPUT -p tcp -m state --state NEW -m tcp --dport 3306 -j ACCEPT
+
+sudo service iptables restart
+
+sudo groupadd mysql
+sudo useradd mysql -g mysql
+sudo mkdir -p /usr/local/mysql
+sudo mkdir -p /var/mysql/data
+
+sudo vi /etc/profile
+Append these 2 lines to the end of the file:
+PATH=/usr/local/mysql/bin:/usr/local/mysql/lib:$PATH
+export PATH
+
+source /etc/profile
+
+sudo yum -y install gcc-c++ ncurses-devel cmake make perl
+cd ~/install/mysql-5.6.12
+tar -zxvf mysql-5.6.12.tar.gz
+cd mysql-5.6.12
+
+sudo cmake \
+-DCMAKE_INSTALL_PREFIX=/usr/local/mysql \
+-DMYSQL_UNIX_ADDR=/usr/local/mysql/mysql.sock \
+-DDEFAULT_CHARSET=utf8 \
+-DDEFAULT_COLLATION=utf8_general_ci \
+-DWITH_MYISAM_STORAGE_ENGINE=1 \
+-DWITH_INNOBASE_STORAGE_ENGINE=1 \
+-DWITH_ARCHIVE_STORAGE_ENGINE=1 \
+-DWITH_BLACKHOLE_STORAGE_ENGINE=1 \
+-DWITH_MEMORY_STORAGE_ENGINE=1 \
+-DWITH_READLINE=1 \
+-DENABLED_LOCAL_INFILE=1 \
+-DMYSQL_DATADIR=/var/mysql/data \
+-DMYSQL_USER=mysql \
+-DMYSQL_TCP_PORT=3306 \
+-DMYSQL_USER=mysql
+
+
+sudo make
+sudo make install
+sudo make clean
+
+sudo chown -R mysql:mysql /usr/local/mysql
+sudo chown -R mysql:mysql /var/mysql/data
+
+cd /usr/local/mysql
+
+sudo scripts/mysql_install_db --user=mysql --datadir=/var/mysql/data
+sudo chown -R mysql:mysql /usr/local/mysql/
+sudo cp /usr/local/mysql/support-files/mysql.server /etc/init.d/mysql
+sudo service mysql start
+
+mysql -u root
+use mysql;
+
+for security in production server:
+sudo /usr/local/mysql/bin/mysql_secure_installation
+
+
+cd /var
+sudo mkdir phpsites
+sudo  chmod +w phpsites/
+sudo chown -R www:www phpsites/
+
+sudo yum install -y openssl.x86_64
+sudo yum install -y openssl-devel.x86_64
+sudo yum install -y apr-devel.x86_64
+
+sudo ./configure --with-apr=/usr/bin/apr-1-config \
+                --with-java-home=/usr/local/java/ \
+                --with-ssl=yes \
+                --prefix=/usr/local/tomcat
+				
+				
+				
+make && make install
+
+vi  $CATALINA_HOME/bin/setenv.sh
+LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$CATALINA_HOME/lib
+export LD_LIBRARY_PATH
+
+jmap -dump:format=b,file=heap.bin <pid>
+
+
+JAVA_OPTS="-server -Xmn1536M -Xms4G -Xmx4G -Xss512k -XX:+HeapDumpOnOutOfMemoryError -XX:HeapDumpPath=/var/log/sdbbiz -XX:+AggressiveOpts -XX:+UseBiasedLocking -XX:PermSize=256M -XX:MaxPermSize=2G -XX:+DisableExplicitGC -XX:MaxTenuringThreshold=31 -XX:+UseConcMarkSweepGC -XX:+UseParNewGC  -XX:+CMSParallelRemarkEnabled -XX:+UseCMSCompactAtFullCollection -XX:LargePageSizeInBytes=128m  -XX:+UseFastAccessorMethods -XX:+UseCMSInitiatingOccupancyOnly -XX:CMSInitiatingOccupancyFraction=70 -Djava.awt.headless=true"
+
+
+sudo chkconfig --add mysql
+sudo chkconfig --level 2345 mysql on
+
+sudo chkconfig --add tomcat
+sudo chkconfig --level 2345 tomcat on
+
+sudo chkconfig --add rabbitmq-server
+sudo chkconfig --level 2345 rabbitmq-server on
+
+sudo chkconfig --add nginx
+sudo chkconfig nginx on
